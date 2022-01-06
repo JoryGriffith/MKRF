@@ -1,0 +1,1843 @@
+---
+title: "control_thinned_cleaned"
+author: "Jory Griffith"
+date: "10/8/2021"
+output: html_document
+---
+
+# Introduction
+This is the analysis for the study on the effects of variable retention harvest on stream communities. 
+
+# Packages
+```{r}
+library(dplyr) # for piping and summary tables
+library(ggplot2) # for plotting
+library(nlme) # for mixed models
+library(emmeans) # for pairwise comparisons from model estimates
+library(forecast) # for the Acf() function for checking for temporal autocorrelation
+library(reshape2) # for creating matrix for ANOSIM
+library(vegan) # for running ANOSIM
+library(zoo) # for aggregating stream temperature data and using the function rollmean() to get rolling averages
+library(lubridate) # for dates on stream temperature data
+library(rsq) # to look at partial R squared values of environmental models
+```
+
+# Data sets
+```{r}
+# Invertebrate abundance and biomass dataset
+dat<-read.csv("Control_Thinned/MKRE.TILE.INVERTS.ctrl_thinned.csv", header=TRUE)
+# Biofilm dataset
+datp<-read.csv("Control_Thinned/cntrl_thinned_AFDM.csv", header=TRUE)
+```
+
+# Invertebrate Data
+
+## Data cleaning
+Here I am making a unique tile id column by combining the stream and the rep together. I am also making a unique column called tile_id_date which will be used for merging the correct rows later on.
+```{r}
+# Making tile ID column
+dat$tile_id<-paste(dat$stream, dat$rep, sep="_")
+# changing date recovered to date format
+dat$date_recovered<-as.Date(dat$date_recovered, format="%m/%d/%y")
+# mkaing unique tile ID Date column for later merging
+dat$tile_id_date<-paste(dat$stream, dat$rep, dat$date_recovered, sep="_")
+```
+
+I want to rename some variables
+```{r}
+#renaming PAR column so it is not so long
+dat<-dat %>% rename(PAR = PAR.umols.m.2s.1)
+# rename total to abundance
+dat<-dat %>% rename(abundance = total)
+```
+
+
+Here I will add a column for taxa richness, which in this case is just the number of different taxa observed on each tile.
+```{r}
+# adding up the number of rows, which is the number of different taxa
+df<-group_by(dat, tile_id_date) %>% summarise(n = n())
+# merging this with the original data
+dat<-merge(dat, df, by="tile_id_date")
+# now I can add in zeros when there are no invertebrates, because right now it is counting those rows
+for(i in 1:nrow(dat)){
+if (dat$abundance[i]==0) {
+  dat$n[i]=0
+}
+}
+# and rename to taxa richness
+dat<-dat %>% rename(taxa_richness = n)
+```
+
+I want to divide my datasets into data with before and after included and data with just after logging. Logging took place in november of 2004 so I will filter for after that.
+```{r}
+dat_all<-dat
+dat<-dat %>% filter(date_recovered>="2004-11-01")
+```
+
+
+Some preliminary data analyses showed the invertebrate abundance and biomass cannot be transformed to meet assumptions, so I will continue with some non-parametric tests.
+
+
+# Biofilm Data
+## Data cleaning
+Here I will use a loop to add a treatment column to the AFDM data
+```{r}
+# need to add treatment column to datp
+datp$treat<-"control"
+
+for(i in 1:nrow(datp)){
+if (datp$site[i]=="j") {
+  datp$treat[i]="thinned"
+}
+if (datp$site[i]=="k") {
+  datp$treat[i]="thinned"
+}
+if (datp$site[i]=="l") {
+  datp$treat[i]="thinned"
+}
+}
+```
+
+Turning the date into date format
+```{r}
+datp$date_recovered<-as.Date((datp$date_recovered), format="%m/%d/%y")
+```
+
+Because this dataset has a significant amount of before logging data, I will create a column for before and after logging that I can later use as a variable.
+```{r}
+# Add before and after logging
+for(i in 1:nrow(datp)){
+if (datp$date_recovered[i]>="2004-11-01") {
+  datp$BACI[i]="after"
+}
+else {datp$BACI[i]="before"}
+}
+```
+
+Now i will make two different data sets, one before and after logging, and one just after logging.
+```{r}
+datp_all<-datp
+# Post logging data
+datp<-datp %>% filter(datp$BACI=="after")
+```
+
+
+## Linear mixed models with periphyton AFDM
+I will run some linear mixed models with periphyton AFDM to determine whether there are treatment effects.
+
+### BACI Model
+This model is determining whether there is an effect of logging on stream biofilm. The fixed effects will be BACI (before or after harvest), treatment, and season. A significant BACI and treatment interaction indicates a significant effect of harvest on biofilm.
+
+Note: I cannot include a 3-way interaction term because there is not data for pairwise combinations of all variables.
+```{r}
+# run model
+mod.BACI<-lme(log(afdm_mg_cm2)~BACI*treat+season, data=datp_all, random=~1|site, na.action=na.exclude)
+
+# checking assumptions
+qqnorm(mod.BACI)
+plot(mod.BACI)
+Acf(residuals(mod.BACI, type="normalized"))
+
+# there is autocorrelation in the residuals so I will add an AR1 correlation structure
+mod.BACI<-lme(log(afdm_mg_cm2)~BACI*treat+season, data=datp_all, random=~1|site, na.action=na.exclude, correlation=corAR1()) # no more correlation
+```
+
+Here I will do some model selection by removing terms.
+```{r}
+# remove BACI and treatment interaction
+mod.BACI.nointrxn<-lme(log(afdm_mg_cm2)~BACI+treat+season, data=datp_all, random=~1|site, na.action=na.exclude, correlation=corAR1())
+
+anova(mod.BACI.nointrxn, mod.BACI)
+# there is no difference between the models with and without the interaction term
+
+# remove BACI
+mod.BACI.noBA<-lme(log(afdm_mg_cm2)~treat+season, data=datp_all, random=~1|site, na.action=na.exclude, correlation=corAR1())
+anova(mod.BACI.nointrxn, mod.BACI.noBA)
+# there is a significant difference when BACI is removed
+
+# remove treatment
+mod.BACI.notreat<-lme(log(afdm_mg_cm2)~BACI+season, data=datp_all, random=~1|site, na.action=na.exclude, correlation=corAR1())
+anova(mod.BACI.nointrxn, mod.BACI.notreat)
+# no significant difference when treatment is removed
+
+# add in BACI and season nteraction term
+mod.BACI.intrxn<-lme(log(afdm_mg_cm2)~BACI*season, data=datp_all, random=~1|site, na.action=na.exclude, correlation=corAR1())
+anova(mod.BACI.notreat, mod.BACI.intrxn)
+# the interaction term is significant
+
+# Final model:
+mod.BACI.intrxn<-lme(log(afdm_mg_cm2)~BACI*season, data=datp_all, random=~1|site, na.action=na.exclude, correlation=corAR1())
+# the interaction with season makes this a better model than the original. However, we are not super interested in season specifically so I am not sure how much this is telling us. 
+```
+
+Evaluate significance of the model.
+```{r}
+summary(mod.BACI)
+anova(mod.BACI)
+```
+
+Look at pairwise comparisons within the model using emmeans
+```{r}
+library(emmeans)
+diffs<-emmeans(mod.BACI, "BACI", by=c("treat"))
+pairs(diffs)
+# in thinned streams, afdm is higher in treatment streams after logging
+```
+
+### Year model
+This model is testing whether there is an effect of regrowth on the stream variables. I am only using data from after logging and testing for an interaction between water year and treatment.
+
+```{r}
+datp.after<-datp_all %>% filter(BACI=="after")
+mod.afdm.yr<-lme(log(afdm_mg_cm2)~treat*water_yr+season, data=datp.after, random=~1|site, na.action=na.exclude, correlation=corAR1())
+summary(mod.afdm.yr)
+Acf(residuals(mod.afdm.yr, type="normalized"))
+
+anova(mod.afdm.yr)
+
+diffs<-emmeans(mod.afdm.yr, "treat", by=c("water_yr"))
+pairs(diffs)
+```
+
+## Model of season and treatment on after data
+I wanted to model just season and treatment so I could get within-season comparisons. I can't do that with the BACI model because there are not all of the required combinations of season, treatment, and BACI.
+```{r}
+mod.afdm.season<-lme(log(afdm_mg_cm2)~treat*season, data=datp.after, random=~1|site, na.action=na.exclude, correlation=corAR1())
+
+summary(mod.afdm.season)
+Acf(residuals(mod.afdm.season, type="normalized")) # clean
+
+anova(mod.afdm.season)
+
+diffs<-emmeans(mod.afdm.season, "treat", by=c("season"))
+diffs
+```
+
+# Permutation tests
+
+First I will merge the invertebrate and AFDM data. Note that this is only the after data because there is not enough data before logging for the invertebrates.
+```{r}
+datp$tile_id_date<-paste(datp$site, datp$rep, datp$date_recovered, sep="_")
+
+datm<-merge(dat, datp, by="tile_id_date")
+```
+
+## Total differences (across all seasons and years)
+
+### Permutation test of total biomass between control and thinned (after logging)
+This a permutation test of the overall difference in total biomass between control and thinned streams across all seasons and years
+```{r}
+#absolute value of difference in total drymass between control and thinned
+(test.stat.1<-abs(mean(dat$total_drymass[dat$treat=="thinned"])
+    -mean(dat$total_drymass[dat$treat=="control"])))
+set.seed(127)
+
+#length
+n<-length(dat$total_drymass)
+#number of permutations
+nreps<-10000
+#variable of interest
+variable<-dat$total_drymass
+#make a matrix to store permutation data
+permsamples<-matrix(0, nrow=n, ncol=nreps)
+
+for (i in 1:nreps){
+  permsamples[,i]<-sample(variable, size=n, replace=FALSE)
+}
+#look at first 5 columns, each value is a different permutation of the data (different total drymass sample)
+
+#initialize vectors to store test stats
+perm.test.stat1<-rep(0,nreps)
+
+#loop through and caluclate test stats
+for (i in 1:nreps) {
+perm.test.stat1[i]<-abs(mean(permsamples[dat$treat=="control",i])-
+                          mean(permsamples[dat$treat=="thinned", i]))
+}
+#calcultae p value
+mean(perm.test.stat1>=test.stat.1)
+```
+
+### Average biomass between controlled and thinned
+```{r}
+(test.stat.1<-abs(mean(dat$avg_drymass[dat$treat=="thinned"])
+    -mean(dat$avg_drymass[dat$treat=="control"])))
+
+set.seed(25)
+#length
+n<-length(dat$avg_drymass)
+#number of permutations
+nreps<-10000
+#variable of interest
+variable<-dat$avg_drymass
+#make a matrix
+permsamples<-matrix(0, nrow=n, ncol=nreps)
+
+for (i in 1:nreps){
+  permsamples[,i]<-sample(variable, size=n, replace=FALSE)
+}
+#each value is a different permutation of the data (different total drymass sample)
+#initialize vectors to store test stats
+perm.test.stat1<-rep(0,nreps)
+
+#loop through and caluclate test stats
+for(i in 1:nreps){
+perm.test.stat1[i]<-abs(mean(permsamples[dat$treat=="thinned",i])-
+                          mean(permsamples[dat$treat=="control", i]))
+}
+#calculatae p value
+mean(perm.test.stat1>=test.stat.1)
+#not significant
+```
+
+### Test of abundance differences
+```{r}
+(obsdiff<-abs(mean(dat[dat$treat=="thinned", "abundance"])
+    -mean(dat[dat$treat=="control", "abundance"])))
+
+set.seed(23)
+
+nreps<-10000
+rdiffs<-numeric(nreps)
+
+#shuffling data so relationship is broken
+for(i in 1:nreps){
+  rand.drymass<-sample(dat$abundance, size=length(dat$abundance), replace=FALSE)
+  rdiffs[i]<-abs(mean(rand.drymass[dat$treat=="thinned"])-mean(rand.drymass[dat$treat=="control"]))
+}
+
+mean(rdiffs>=obsdiff)
+#not significant
+#same(ish) value as the other method yay, they both work
+```
+
+## Seasonal Differences
+Now I will test for within-season differences between treatments by subsetting by season and running permutation tests for the invertebrate measures.
+
+### Abundance
+
+#### Summer
+```{r}
+#Summer
+datsum<-dat %>% filter(dat$season=='summer')
+set.seed(65)
+
+(obsdiff<-abs(mean(datsum[datsum$treat=="thinned", "abundance"])
+    -mean(datsum[datsum$treat=="control", "abundance"])))
+
+nreps<-10000
+rdiffs<-numeric(nreps)
+
+for(i in 1:nreps){
+  rand.drymass<-sample(datsum$abundance, size=length(datsum$abundance), replace=FALSE)
+  rdiffs[i]<-abs(mean(rand.drymass[datsum$treat=="thinned"])-mean(rand.drymass[datsum$treat=="control"]))
+}
+
+mean(rdiffs>=obsdiff)
+#p=9e-04
+
+# looking at absolute differences between treatments
+(mean(datsum[datsum$treat=="thinned", "abundance"])
+    /mean(datsum[datsum$treat=="control", "abundance"]))
+```
+
+#### Winter
+```{r}
+#Winter
+datwin<-dat %>% filter(dat$season=='winter')
+
+set.seed(99)
+
+(obsdiff<-abs(mean(datwin[datwin$treat=="thinned", "abundance"])
+    -mean(datwin[datwin$treat=="control", "abundance"])))
+
+nreps<-10000
+rdiffs<-numeric(nreps)
+
+for(i in 1:nreps){
+  rand.drymass<-sample(datwin$abundance, size=length(datwin$abundance), replace=FALSE)
+  rdiffs[i]<-abs(mean(rand.drymass[datwin$treat=="thinned"])-mean(rand.drymass[datwin$treat=="control"]))
+}
+
+mean(rdiffs>=obsdiff)
+#p=0.93
+```
+
+#### Spring
+```{r}
+#Spring
+datspr<-dat %>% filter(dat$season=='spring')
+
+set.seed(78)
+
+(obsdiff<-abs(mean(datspr[datspr$treat=="thinned", "abundance"])
+    -mean(datspr[datspr$treat=="control", "abundance"])))
+
+nreps<-10000
+rdiffs<-numeric(nreps)
+
+for(i in 1:nreps){
+  rand.drymass<-sample(datspr$abundance, size=length(datspr$abundance), replace=FALSE)
+  rdiffs[i]<-abs(mean(rand.drymass[datspr$treat=="thinned"])-mean(rand.drymass[datspr$treat=="control"]))
+}
+
+mean(rdiffs>=obsdiff)
+#p=0.4547
+```
+
+#### Fall
+```{r}
+datfall<-dat %>% filter(dat$season=='fall')
+
+set.seed(122)
+
+(obsdiff<-abs(mean(datfall[datfall$treat=="thinned", "abundance"])
+    -mean(datfall[datfall$treat=="control", "abundance"])))
+
+nreps<-10000
+rdiffs<-numeric(nreps)
+
+for(i in 1:nreps){
+  rand.drymass<-sample(datfall$abundance, size=length(datfall$abundance), replace=FALSE)
+  rdiffs[i]<-abs(mean(rand.drymass[datfall$treat=="thinned"])-mean(rand.drymass[datfall$treat=="control"]))
+}
+
+mean(rdiffs>=obsdiff)
+# no difference but makes sense because these dates were pre and during logging
+```
+
+### Total Biomass
+
+#### Summer
+```{r}
+####Summer-mean
+datsum<-dat %>% filter(dat$season=='summer')
+set.seed(333)
+
+(obsdiff<-abs(mean(datsum[datsum$treat=="thinned", "total_drymass"])
+    -mean(datsum[datsum$treat=="control", "total_drymass"])))
+
+nreps<-10000
+rdiffs<-numeric(nreps)
+
+for(i in 1:nreps){
+  rand.drymass<-sample(datsum$total_drymass, size=length(datsum$total_drymass), replace=FALSE)
+  rdiffs[i]<-abs(mean(rand.drymass[datsum$treat=="thinned"])-mean(rand.drymass[datsum$treat=="control"]))
+}
+
+mean(rdiffs>=obsdiff)
+```
+
+#### Winter
+```{r}
+#Winter
+datwin<-dat %>% filter(dat$season=='winter')
+set.seed(45)
+(obsdiff<-abs(mean(datwin[datwin$treat=="thinned", "total_drymass"])
+    -mean(datwin[datwin$treat=="control", "total_drymass"])))
+
+set.seed(333)
+
+nreps<-10000
+rdiffs<-numeric(nreps)
+
+for(i in 1:nreps){
+  rand.drymass<-sample(datwin$total_drymass, size=length(datwin$total_drymass), replace=FALSE)
+  rdiffs[i]<-abs(mean(rand.drymass[datwin$treat=="thinned"])-mean(rand.drymass[datwin$treat=="control"]))
+}
+
+mean(rdiffs>=obsdiff)
+#p=0.1
+```
+
+#### Spring
+```{r}
+#Spring
+datspr<-dat %>% filter(dat$season=='summer')
+set.seed(65)
+(obsdiff<-abs(mean(datspr[datspr$treat=="thinned", "total_drymass"])
+    -mean(datspr[datspr$treat=="control", "total_drymass"])))
+
+nreps<-10000
+rdiffs<-numeric(nreps)
+
+for(i in 1:nreps){
+  rand.drymass<-sample(datspr$total_drymass, size=length(datspr$total_drymass), replace=FALSE)
+  rdiffs[i]<-abs(mean(rand.drymass[datspr$treat=="thinned"])-mean(rand.drymass[datspr$treat=="control"]))
+}
+
+mean(rdiffs>=obsdiff)
+#p=0.41
+```
+
+#### Fall
+```{r}
+datfall<-dat %>% filter(dat$season=='fall')
+set.seed(3)
+(obsdiff<-abs(mean(datfall[datfall$treat=="thinned", "total_drymass"])
+    -mean(datfall[datfall$treat=="control", "total_drymass"])))
+
+nreps<-10000
+rdiffs<-numeric(nreps)
+
+for(i in 1:nreps){
+  rand.drymass<-sample(datfall$total_drymass, size=length(datfall$total_drymass), replace=FALSE)
+  rdiffs[i]<-abs(mean(rand.drymass[datfall$treat=="thinned"])-mean(rand.drymass[datfall$treat=="control"]))
+}
+
+mean(rdiffs>=obsdiff)
+```
+
+### Average biomass
+
+#### Summer
+```{r}
+####Summer#######
+## Mean untransformed
+datsum<-dat %>% filter(dat$season=='summer')
+set.seed(35)
+(obsdiff<-abs(mean(datsum[datsum$treat=="thinned", "avg_drymass"])
+    -mean(datsum[datsum$treat=="control", "avg_drymass"])))
+
+nreps<-10000
+rdiffs<-numeric(nreps)
+
+for(i in 1:nreps){
+  rand.drymass<-sample(datsum$avg_drymass, size=length(datsum$avg_drymass), replace=FALSE)
+  rdiffs[i]<-abs(mean(rand.drymass[datsum$treat=="thinned"])-mean(rand.drymass[datsum$treat=="control"]))
+}
+
+mean(rdiffs>=obsdiff)
+#p=0.09
+```
+
+#### Winter
+```{r}
+######Winter######
+datwin<-dat %>% filter(dat$season=='winter')
+set.seed(45)
+(obsdiff<-abs(mean(datwin[datwin$treat=="thinned", "avg_drymass"])
+    -mean(datwin[datwin$treat=="control", "avg_drymass"])))
+
+nreps<-10000
+rdiffs<-numeric(nreps)
+
+for(i in 1:nreps){
+  rand.drymass<-sample(datwin$avg_drymass, size=length(datwin$avg_drymass), replace=FALSE)
+  rdiffs[i]<-abs(mean(rand.drymass[datwin$treat=="thinned"])-mean(rand.drymass[datwin$treat=="control"]))
+}
+
+mean(rdiffs>=obsdiff)
+#p=0.63
+```
+
+#### Spring
+```{r}
+########Spring######
+datspr<-dat %>% filter(dat$season=='spring')
+set.seed(567)
+(obsdiff<-abs(mean(datspr[datspr$treat=="thinned", "avg_drymass"])
+    -mean(datspr[datspr$treat=="control", "avg_drymass"])))
+
+nreps<-10000
+rdiffs<-numeric(nreps)
+
+for(i in 1:nreps){
+  rand.drymass<-sample(datspr$avg_drymass, size=length(datspr$avg_drymass), replace=FALSE)
+  rdiffs[i]<-abs(mean(rand.drymass[datspr$treat=="thinned"])-mean(rand.drymass[datspr$treat=="control"]))
+}
+
+mean(rdiffs>=obsdiff)
+```
+
+#### Fall
+```{r}
+datfall<-dat %>% filter(dat$season=='fall')
+set.seed(789)
+(obsdiff<-abs(mean(datfall[datfall$treat=="thinned", "avg_drymass"])
+    -mean(datfall[datfall$treat=="control", "avg_drymass"])))
+
+nreps<-10000
+rdiffs<-numeric(nreps)
+
+for(i in 1:nreps){
+  rand.drymass<-sample(datfall$avg_drymass, size=length(datfall$avg_drymass), replace=FALSE)
+  rdiffs[i]<-abs(mean(rand.drymass[datfall$treat=="thinned"])-mean(rand.drymass[datfall$treat=="control"]))
+}
+
+mean(rdiffs>=obsdiff)
+```
+
+## Seasonal differences in just chironomids
+Now I am testing within-season differences in just Chironomids by subsetting by season
+
+### Total biomass
+```{r}
+datChrSeas<-dat %>% filter(dat$category=="chironomids") %>% filter(season=="winter")
+# filter(season=="summer")
+# filter(season=="spring")
+# filter(season=="fall")
+set.seed(12)
+(obsdiff<-abs(mean(datChrSeas[datChrSeas$treat=="thinned", "total_drymass"])
+    -(mean(datChrSeas[datChrSeas$treat=="control", "total_drymass"]))))
+nreps<-10000
+rdiffs<-numeric(nreps)
+
+for(i in 1:nreps){
+  rand.drymass<-sample(datChrSeas$total_drymass, size=length(datChrSeas$total_drymass), replace=FALSE)
+  rdiffs[i]<-abs(mean(rand.drymass[datChrSeas$treat=="thinned"])-mean(rand.drymass[datChrSeas$treat=="control"]))
+}
+
+mean(rdiffs>=obsdiff)
+# winter: p=0.26
+# spring: P=0.38
+# summer: P=0.0015 
+```
+
+### Abundance
+```{r}
+datChrSeas<-dat %>% filter(category=="chironomids") %>% filter(season=="spring")
+# filter(season=="summer")
+# filter(season=="winter")
+# filter(season=="fall")
+set.seed(12)
+(obsdiff<-abs(mean(datChrSeas[datChrSeas$treat=="thinned", "abundance"])
+    -(mean(datChrSeas[datChrSeas$treat=="control", "abundance"]))))
+nreps<-10000
+rdiffs<-numeric(nreps)
+
+for(i in 1:nreps){
+  rand.drymass<-sample(datChrSeas$abundance, size=length(datChrSeas$abundance), replace=FALSE)
+  rdiffs[i]<-abs(mean(rand.drymass[datChrSeas$treat=="thinned"])-mean(rand.drymass[datChrSeas$treat=="control"]))
+}
+
+mean(rdiffs>=obsdiff)
+# winter: p=0.07
+# summer: P=0
+# spring: P=0.11
+```
+
+## Seasonal Differences in just mayflies
+
+### Total biomass
+```{r}
+datMaySeas<-dat %>% filter(dat$category=="mayflies") %>% filter(season=="winter")
+# filter(season=="summer")
+# filter(season=="spring")
+# filter(season=="fall")
+
+set.seed(12)
+(obsdiff<-abs(mean(datMaySeas[datMaySeas$treat=="thinned", "total_drymass"])
+    -(mean(datMaySeas[datMaySeas$treat=="control", "total_drymass"]))))
+nreps<-10000
+rdiffs<-numeric(nreps)
+
+for(i in 1:nreps){
+  rand.drymass<-sample(datMaySeas$total_drymass, size=length(datMaySeas$total_drymass), replace=FALSE)
+  rdiffs[i]<-abs(mean(rand.drymass[datMaySeas$treat=="thinned"])-mean(rand.drymass[datMaySeas$treat=="control"]))
+}
+
+mean(rdiffs>=obsdiff)
+# spring: 0.01
+# summer: 0.04
+# winter: 0.7
+```
+
+## Permuation tests by year
+I am running permutation tests by year to test for the effects of forest regrowth on streams. If there are differences in years soon after logging but not after a few years, that suggests that maybe forest regrowth is decreasing the impact of logging on streams.
+
+### Abundance
+```{r}
+# 2003-2004
+# 2004-2005 
+# 2005-2006 
+# 2006-2007 
+# 2007-2008 
+datyr<-dat_all %>% filter(dat_all$water_yr=="2007-2008")
+set.seed(15)
+(obsdiff<-abs(mean(datyr[datyr$treat=="thinned", "abundance"])
+    -mean(datyr[datyr$treat=="control", "abundance"])))
+
+nreps<-10000
+rdiffs<-numeric(nreps)
+
+for(i in 1:nreps){
+  rand.drymass<-sample(datyr$abundance, size=length(datyr$abundance), replace=FALSE)
+  rdiffs[i]<-abs(mean(rand.drymass[datyr$treat=="thinned"])-mean(rand.drymass[datyr$treat=="control"]))
+}
+
+mean(rdiffs>=obsdiff)
+
+mean(datyr[datyr$treat=="thinned", "abundance"])/(mean(datyr[datyr$treat=="control", "abundance"]))
+```
+
+### Average biomass
+```{r}
+# 2003-2004
+# 2004-2005 
+# 2005-2006 
+# 2006-2007 
+# 2007-2008 
+datyr<-dat_all %>% filter(dat_all$water_yr=="2007-2008")
+set.seed(15)
+(obsdiff<-abs(mean(datyr[datyr$treat=="thinned", "avg_drymass"])
+    -mean(datyr[datyr$treat=="control", "avg_drymass"])))
+
+nreps<-10000
+rdiffs<-numeric(nreps)
+
+for(i in 1:nreps){
+  rand.drymass<-sample(datyr$avg_drymass,size=length(datyr$avg_drymass), replace=FALSE)
+  rdiffs[i]<-abs(mean(rand.drymass[datyr$treat=="thinned"])-mean(rand.drymass[datyr$treat=="control"]))
+}
+
+mean(rdiffs>=obsdiff)
+
+mean(datyr[datyr$treat=="thinned", "avg_drymass"])/(mean(datyr[datyr$treat=="control", "avg_drymass"]))
+```
+
+### Total biomass
+```{r}
+datyr<-dat_all %>% filter(dat_all$water_yr=="2007-2008")
+set.seed(15)
+(obsdiff<-abs(mean(datyr[datyr$treat=="thinned", "total_drymass"])
+    -mean(datyr[datyr$treat=="control", "total_drymass"])))
+
+nreps<-10000
+rdiffs<-numeric(nreps)
+
+for(i in 1:nreps){
+  rand.drymass<-sample(datyr$total_drymass, size=length(datyr$total_drymass), replace=FALSE)
+  rdiffs[i]<-abs(mean(rand.drymass[datyr$treat=="thinned"])-mean(rand.drymass[datyr$treat=="control"]))
+}
+
+mean(rdiffs>=obsdiff)
+
+mean(datyr[datyr$treat=="thinned", "total_drymass"])/mean(datyr[datyr$treat=="control", "total_drymass"])
+# 2003-2004
+# 2004-2005 
+# 2005-2006 
+# 2006-2007 
+# 2007-2008 
+```
+
+## Permutation test of taxa richness
+```{r}
+(obsdiff<-abs(mean(dat[dat$treat=="thinned", "taxa_richness"])
+    -mean(dat[dat$treat=="control", "taxa_richness"])))
+set.seed(42)
+nreps<-10000
+rdiffs<-numeric(nreps)
+
+for(i in 1:nreps){
+  rand.drymass<-sample(dat$taxa_richness, size=length(dat$taxa_richness), replace=FALSE)
+  rdiffs[i]<-abs(mean(rand.drymass[dat$treat=="thinned"])-mean(rand.drymass[dat$treat=="control"]))
+}
+
+mean(rdiffs>=obsdiff)
+```
+
+## Taxa richness by season
+I am testing for within-differences in taxa richness by subsetting by season and running permutation tests within seasons.
+```{r}
+datsum<-dat %>% filter(season=="fall")
+# filter(season=="spring")
+# filter(season=="summer")
+# filter(season=="fall")
+set.seed(42)
+(obsdiff<-abs(mean(datsum[datsum$treat=="thinned", "taxa_richness"])
+    -mean(datsum[datsum$treat=="control", "taxa_richness"])))
+
+nreps<-10000
+rdiffs<-numeric(nreps)
+
+for(i in 1:nreps){
+  rand.drymass<-sample(datsum$taxa_richness, size=length(datsum$taxa_richness), replace=FALSE)
+  rdiffs[i]<-abs(mean(rand.drymass[datsum$treat=="thinned"])-mean(rand.drymass[datsum$treat=="control"]))
+}
+
+mean(rdiffs>=obsdiff)
+
+mean(datsum[datsum$treat=="thinned","taxa_richness"])-mean(datsum[datsum$treat=="control", "taxa_richness"])
+```
+
+## Taxa richness by year
+Testing for within-year differences in taxa richness
+```{r}
+taxa_yr<-dat_all %>% filter(water_yr=="2005-2006")
+set.seed(42)
+(obsdiff<-abs(mean(taxa_yr[taxa_yr$treat=="thinned", "taxa_richness"])
+    -mean(taxa_yr[taxa_yr$treat=="control", "taxa_richness"])))
+
+nreps<-10000
+rdiffs<-numeric(nreps)
+
+for(i in 1:nreps){
+  rand.drymass<-sample(taxa_yr$taxa_richness, size=length(taxa_yr$taxa_richness), replace=FALSE)
+  rdiffs[i]<-abs(mean(rand.drymass[taxa_yr$treat=="thinned"])-mean(rand.drymass[taxa_yr$treat=="control"]))
+}
+
+mean(rdiffs>=obsdiff)
+# 2007-8: p=0.11
+# 2006-7: p=0.056
+# 2005-6: p=0.11
+mean(taxa_yr[taxa_yr$treat=="thinned","taxa_richness"])-mean(taxa_yr[taxa_yr$treat=="control", "taxa_richness"])
+```
+
+## Permutation test of PAR
+Testing for differences in PAR between treatments using a permutation test
+```{r}
+(obsdiff<-abs(mean(dat[dat$treat=="control", "PAR"], na.rm=TRUE)
+    -mean(dat[dat$treat=="thinned", "PAR"], na.rm=TRUE)))
+set.seed(88)
+158.3747/14.845
+
+nreps<-10000
+rdiffs<-numeric(nreps)
+
+for(i in 1:nreps){
+  rand<-sample(dat$PAR, size=length(dat$PAR), replace=FALSE)
+  rdiffs[i]<-abs(mean(rand[dat$treat=="control"], na.rm=TRUE)-mean(rand[dat$treat=="thinned"], na.rm=TRUE))
+}
+
+mean(rdiffs>=obsdiff)
+# very very small p-value
+```
+
+## Permutation test of PAR by season
+```{r}
+datseas<-dat %>% filter(season=="summer")
+# filter(season=="spring")
+# filter(season=="winter")
+# filter(season=="fall")
+
+set.seed(99)
+(obsdiff<-abs(mean(datseas[datseas$treat=="control", "PAR"], na.rm=TRUE)
+    -mean(datseas[datseas$treat=="thinned", "PAR"], na.rm=TRUE)))
+
+nreps<-10000
+rdiffs<-numeric(nreps)
+
+for(i in 1:nreps){
+  rand<-sample(datseas$PAR, size=length(datseas$PAR), replace=FALSE)
+  rdiffs[i]<-abs(mean(rand[datseas$treat=="control"], na.rm=TRUE)-mean(rand[datseas$treat=="thinned"], na.rm=TRUE))
+}
+
+mean(rdiffs>=obsdiff)
+# very very small p-value
+
+mean(datseas[datseas$treat=="thinned", "PAR"], na.rm=TRUE)/mean(datseas[datseas$treat=="control", "PAR"], na.rm=TRUE) 
+```
+
+## Permutation test PAR by water year
+```{r}
+# 2003-2004
+# 2004-2005 
+# 2005-2006 
+# 2006-2007 
+# 2007-2008 
+datwateryr<-dat %>% filter(water_yr=="2007-2008")
+
+set.seed(99)
+(obsdiff<-abs(mean(datwateryr[datwateryr$treat=="control", "PAR"], na.rm=TRUE)
+    -mean(datwateryr[datwateryr$treat=="thinned", "PAR"], na.rm=TRUE)))
+
+nreps<-10000
+rdiffs<-numeric(nreps)
+
+for(i in 1:nreps){
+  rand<-sample(datwateryr$PAR, size=length(datwateryr$PAR), replace=FALSE)
+  rdiffs[i]<-abs(mean(rand[datwateryr$treat=="control"], na.rm=TRUE)-mean(rand[datwateryr$treat=="thinned"], na.rm=TRUE))
+}
+
+mean(rdiffs>=obsdiff)
+# very very small p-value
+
+mean(datwateryr[datwateryr$treat=="thinned", "PAR"], na.rm=TRUE)/mean(datwateryr[datwateryr$treat=="control", "PAR"], na.rm=TRUE)
+```
+
+# ANOSIM
+Now I will do an analysis of similarities on the matrix of invertebrate abundances to see if there are differences in community composition between treatments. This is a multivariate analysis.
+```{r}
+#make community matrix of the abundances of the taxa
+anosimdat<-dat %>% group_by(tile_id_date, category, treat) %>% summarise(abundance=sum(abundance))
+# make into wide form so each taxa is a column
+anosimdat2<-dcast(anosimdat, tile_id_date+treat~category, value.var="abundance", na.rm=T)
+
+
+com<- anosimdat2[, c(2:8)]
+# turning NAs into 0s (for some reason when there are 0 individuals is it showing up as NA right now)
+com[is.na(com)] = 0
+
+m_com<-data.matrix(com, rownames.force=NA)
+
+# Running ANOSIM on invertebrate abundance
+ano=anosim(m_com, anosimdat2$treat, distance="bray", permutations=999, strata=NULL)
+plot(ano)
+#significant, R=0.2608, p=0.001
+summary(ano) 
+
+# export anosim matrix into csv form
+write.csv(com,"ANOSIMdata.csv", row.names = FALSE)
+```
+
+# Stream Temperature Data Wrangling
+
+## Load and format daily mean temperature, put into long form
+```{r}
+tempraw<-read.csv("Control_Thinned/Tmean.csv")
+
+tempraw$date<-as.Date(tempraw$date, format="%m/%d/%y")
+#taking out just the columns of interest
+tempraw<-tempraw[,c(3, 5, 6, 7, 8, 12, 16, 20)]
+
+tempraw<-tempraw %>% rename(mc=Mike, sc=Spring, ec=East, k=Griff_0, j=Mirror_0, l=Sidle_0)
+
+library("reshape2")
+temp_long2<-melt(tempraw, id=c("date", "season"))
+names(temp_long2)<-c("date", "season", "stream", "meandailytemp") 
+```
+
+Add treatments to temperature data
+```{r}
+# assign treatments
+rawtemp<-temp_long2
+rawtemp$treat<-"control"
+
+for(i in 1:nrow(rawtemp)){
+if (rawtemp$stream[i]=="j") {
+  rawtemp$treat[i]="thinned"
+}
+if (rawtemp$stream[i]=="k") {
+  rawtemp$treat[i]="thinned"
+}
+if (rawtemp$stream[i]=="l") {
+  rawtemp$treat[i]="thinned"
+}
+}
+```
+
+## Load and format daily MAX temperature
+Put into long form, marge with daily mean temperature
+```{r}
+tempmax<-read.csv("Control_Thinned/Tmax.csv")
+
+tempmax$date<-as.Date(tempmax$date, format="%m/%d/%y")
+#taking out just the columns of interest
+tempmax<-tempmax[,c(3, 5, 6, 7, 8, 12, 16)]
+
+tempmax<-tempmax %>% rename(mc=Mike, sc=Spring, ec=East, k=Griff_0, j=Mirror_0, l=Sidle_0)
+
+library("reshape2")
+temp_long3<-melt(tempmax, id=c("date"))
+names(temp_long3)<-c("date_recovered", "stream", "maxdailytemp")
+
+temp_long3$stream_date<-paste(temp_long3$stream, temp_long3$date_recovered, sep="-")
+temp_long3<-temp_long3[,c(3,4)]
+
+rawtemp$stream_date<-paste(rawtemp$stream, rawtemp$date, sep="-")
+
+rawtemp<-merge(rawtemp, temp_long3, by="stream_date")
+```
+
+## Load and format daily MIN temperature
+Put into long format and merge with max and mean
+```{r}
+tempmin<-read.csv("Control_Thinned/Tmin.csv")
+
+tempmin$date<-as.Date(tempmin$date, format="%m/%d/%y")
+
+tempmin<-tempmin[,c(3, 5, 6, 7, 8, 12, 16)]
+
+tempmin<-tempmin %>% rename(mc=Mike, sc=Spring, ec=East, k=Griff_0, j=Mirror_0, l=Sidle_0)
+
+temp_long4<-melt(tempmin, id=c("date"))
+names(temp_long4)<-c("date_recovered", "stream", "mindailytemp")
+
+temp_long4$stream_date<-paste(temp_long4$stream, temp_long4$date_recovered, sep="-")
+temp_long4<-temp_long4[,c(3,4)]
+
+rawtemp<-merge(rawtemp, temp_long4, by="stream_date")
+```
+
+## Daily range
+Getting the daily stream temperature range by subtracting the minimum daily temperature from the maximum daily temperature
+```{r}
+rawtemp$dailyrange<-rawtemp$maxdailytemp-rawtemp$mindailytemp # subtract maximum temperature from minimum temperature
+```
+
+## Add in before/after logging
+Adding in a column for before and after logging to the daily stream temperature data
+```{r}
+for (i in 1:nrow(rawtemp)){
+  if (rawtemp$date[i]<"2004-11-01"){
+    rawtemp$BACI[i]="before"
+  }
+  else {rawtemp$BACI[i]="after"}
+}
+```
+
+
+## Temperature - 7 day average of average (AWAT)
+I am going to use the aggregate function to find the seven day average of the average (average weekly average temperature)
+
+```{r}
+z1<-zoo(tempraw$ec, order.by=as.Date(tempraw$date, format="%Y-%m-%d"))
+weeklymeanec<-aggregate(z1, as.Date(cut(time(z1), "week")), mean)
+weeklyec.df<-broom::tidy(weeklymeanec)
+weeklyec.df$stream<-"ec"
+
+z2<-zoo(tempraw$mc, order.by=as.Date(tempraw$date, format="%Y-%m-%d"))
+weeklymeanmc<-aggregate(z2, as.Date(cut(time(z1), "week")), mean)
+weeklymc.df<-broom::tidy(weeklymeanmc)
+weeklymc.df$stream<-"mc"
+
+z3<-zoo(tempraw$sc, order.by=as.Date(tempraw$date, format="%Y-%m-%d"))
+weeklymeansc<-aggregate(z3, as.Date(cut(time(z1), "week")), mean)
+weeklysc.df<-broom::tidy(weeklymeansc)
+weeklysc.df$stream<-"sc"
+
+z4<-zoo(tempraw$k, order.by=as.Date(tempraw$date, format="%Y-%m-%d"))
+weeklymeank<-aggregate(z4, as.Date(cut(time(z1), "week")), mean)
+weeklyk.df<-broom::tidy(weeklymeank)
+weeklyk.df$stream<-"k"
+
+z5<-zoo(tempraw$j, order.by=as.Date(tempraw$date, format="%Y-%m-%d"))
+weeklymeanj<-aggregate(z5, as.Date(cut(time(z1), "week")), mean)
+weeklyj.df<-broom::tidy(weeklymeanj)
+weeklyj.df$stream<-"j"
+
+z6<-zoo(tempraw$l, order.by=as.Date(tempraw$date, format="%Y-%m-%d"))
+weeklymeanl<-aggregate(z1, as.Date(cut(time(z6), "week")), mean)
+weeklyl.df<-broom::tidy(weeklymeanl)
+weeklyl.df$stream<-"l"
+
+AWAT<-rbind(weeklyec.df, weeklysc.df, weeklymc.df, weeklyk.df, weeklyl.df, weeklyj.df)
+names(AWAT)<-c("date", "AWAT", "stream")
+```
+
+## Temperature - 7 day max of mean (MWAT)
+Calculating 7 day maximum of the daily average (maximum weekly average temperature)
+```{r}
+weeklymaxec<-aggregate(z1, as.Date(cut(time(z1), "week")), max)
+maxec.df<-broom::tidy(weeklymaxec)
+maxec.df$stream<-"ec"
+
+weeklymaxmc<-aggregate(z2, as.Date(cut(time(z1), "week")), max)
+maxmc.df<-broom::tidy(weeklymaxmc)
+maxmc.df$stream<-"mc"
+
+weeklymaxsc<-aggregate(z3, as.Date(cut(time(z1), "week")), max)
+maxsc.df<-broom::tidy(weeklymaxsc)
+maxsc.df$stream<-"sc"
+
+weeklymaxk<-aggregate(z4, as.Date(cut(time(z1), "week")), max)
+maxk.df<-broom::tidy(weeklymaxk)
+maxk.df$stream<-"k"
+
+weeklymaxj<-aggregate(z5, as.Date(cut(time(z1), "week")), max)
+maxj.df<-broom::tidy(weeklymaxj)
+maxj.df$stream<-"j"
+
+weeklymaxl<-aggregate(z1, as.Date(cut(time(z6), "week")), max)
+maxl.df<-broom::tidy(weeklymaxl)
+maxl.df$stream<-"l"
+
+MWAT<-rbind(maxec.df, maxsc.df, maxmc.df, maxk.df, maxl.df, maxj.df)
+names(MWAT)<-c("date", "MWAT", "stream")
+```
+
+## Temperature - 7 day max of max (MWMT)
+Calculating the 7 day stream temperature maximum
+```{r}
+z1<-zoo(tempmax$ec, order.by=as.Date(tempmax$date, format="%Y-%m-%d"))
+weeklymaxec<-aggregate(z1, as.Date(cut(time(z1), "week")), max)
+weeklymaxec.df<-broom::tidy(weeklymaxec)
+weeklymaxec.df$stream<-"ec"
+
+z2<-zoo(tempmax$mc, order.by=as.Date(tempmax$date, format="%Y-%m-%d"))
+weeklymaxmc<-aggregate(z2, as.Date(cut(time(z1), "week")), max)
+weeklymaxmc.df<-broom::tidy(weeklymaxmc)
+weeklymaxmc.df$stream<-"mc"
+
+z3<-zoo(tempmax$sc, order.by=as.Date(tempmax$date, format="%Y-%m-%d"))
+weeklymaxsc<-aggregate(z3, as.Date(cut(time(z1), "week")), max)
+weeklymaxsc.df<-broom::tidy(weeklymaxsc)
+weeklymaxsc.df$stream<-"sc"
+
+z4<-zoo(tempmax$k, order.by=as.Date(tempmax$date, format="%Y-%m-%d"))
+weeklymaxk<-aggregate(z4, as.Date(cut(time(z1), "week")), max)
+weeklymaxk.df<-broom::tidy(weeklymaxk)
+weeklymaxk.df$stream<-"k"
+
+z5<-zoo(tempmax$j, order.by=as.Date(tempmax$date, format="%Y-%m-%d"))
+weeklymaxj<-aggregate(z5, as.Date(cut(time(z1), "week")), max)
+weeklymaxj.df<-broom::tidy(weeklymaxj)
+weeklymaxj.df$stream<-"j"
+
+z6<-zoo(tempmax$l, order.by=as.Date(tempmax$date, format="%Y-%m-%d"))
+weeklymaxl<-aggregate(z1, as.Date(cut(time(z6), "week")), max)
+weeklymaxl.df<-broom::tidy(weeklymaxl)
+weeklymaxl.df$stream<-"l"
+
+MWMT<-rbind(weeklymaxec.df, weeklymaxsc.df, weeklymaxmc.df, weeklymaxk.df, weeklymaxl.df, weeklymaxj.df)
+names(MWMT)<-c("date", "MWMT", "stream")
+```
+
+## Merge weekly temp metrics
+Merging all of the weekly temperature metrics together into one data frame and adding in a column for before/after logging
+```{r}
+AWAT$stream_date<-paste(AWAT$stream, AWAT$date, sep="-")
+MWAT$stream_date<-paste(MWAT$stream, MWAT$date, sep="-")
+MWMT$stream_date<-paste(MWMT$stream, MWMT$date, sep="-")
+
+weekly1<-merge(AWAT, MWAT[,c(2,4)], by="stream_date")
+weekly2<-merge(weekly1, MWMT[,c(2,4)], by="stream_date")
+
+
+# add season
+weekly<-merge(rawtemp[,c(1,3, 6)], weekly2, by="stream_date")
+
+# add BACI
+for (i in 1:nrow(weekly)){
+  if (weekly$date[i]<"2004-11-01"){
+    weekly$BACI[i]="before"
+  }
+  else {weekly$BACI[i]="after"}
+}
+```
+
+# Stream Temperature Modelling
+I am running linear mixed models on the stream temperature data with a triple interaction between treatment, season, and before/after logging.
+
+## AWAT
+Modeling the average weekly average temperature as a linear mixed model using the lme() function. I am including stream as a random factor to account for variation within streams. 
+```{r}
+# reorder levels so that it is comparing everything to summer, control, and before logging
+weekly2<-weekly
+weekly2$season<-factor(weekly2$season, levels=c("summer", "fall", "winter", "spring"))
+weekly2$BACI<-factor(weekly2$BACI, levels=c("before", "after"))
+
+# Do some model selection to make sure that the three way interaction is significant
+AWATmod<-lme(AWAT~treat*season*BACI, data=weekly2, random=~1|stream, na.action=na.exclude, method="ML")
+#AWATmod2<-lme(AWAT~season+treat*BACI, data=weekly, random=~1|stream, na.action=na.exclude, method="ML")
+
+summary(AWATmod) # AIC 4,811
+# looking at temporal autocorrelation
+Pacf(resid(AWATmod, type="normalized")) # very cyclical, looks like an AR1 process
+# AR1 correlation structure
+cs1<-corAR1()
+# updating model with the temporal autocorrelation structure
+AWATmod<-update(AWATmod, correlation=cs1)
+# checking residuals of the updated model
+Acf(resid(AWATmod, type="normalized")) # residuals are clean!!
+
+# check assumptions
+qqnorm(AWATmod)
+plot(residuals(AWATmod))
+# look at model results
+anova(AWATmod)
+summary(AWATmod)
+```
+
+### emmeans for AWAT
+I am looking at pairwise differences between treatments within seasons using the emmeans package. This specifically looks at whether treatments are different within seasons and before/after logging (for example whether thinned streams have different average weekly average temperatures in summer after logging).
+```{r}
+diffs<-emmeans(AWATmod, "treat", by=c("season", "BACI"))
+pairs(diffs)
+```
+
+## MWAT
+Now I am running the same model with the maximum weekly average temperature. Again, I am including stream as a random effect.
+```{r}
+MWATmod<-lme(MWAT~treat*season*BACI, data=weekly2, random=~1|stream, na.action=na.exclude, method="ML")
+
+Acf(resid(MWATmod, type="normalized")) # very cyclical, looks like an AR1 process
+cs1<-corAR1()
+MWATmod<-update(MWATmod, correlation=cs1)
+summary(MWATmod) # AIC 3,911
+Acf(resid(MWATmod, type="normalized")) # residuals are clean
+# check assumptions
+qqnorm(MWATmod)
+plot(residuals(MWATmod))
+
+# Nothing is significant
+anova(MWATmod)
+summary(MWATmod)
+```
+
+### Emmeans for MWAT
+Looking at pairwise differences between treatments within seasons and BACI.
+```{r}
+diffs<-emmeans(MWATmod, "treat", by=c("season", "BACI"))
+pairs(diffs)
+# none are significant
+```
+
+## MWMT
+Running the same model with maximum weekly maximum temperature.
+```{r}
+MWMTmod<-lme(MWMT~treat*season*BACI, data=weekly2, random=~1|stream, na.action=na.exclude, method="ML")
+summary(MWMTmod) # AIC 4,833
+Acf(resid(MWMTmod, type="normalized")) # very cyclical, looks like an AR1 process
+cs1<-corAR1()
+MWMTmod<-update(MWMTmod, correlation=cs1)
+summary(MWMTmod) # AIC 3,911
+Acf(resid(MWMTmod, type="normalized")) # residuals are clean
+anova(MWMTmod)
+
+# check assumptions
+qqnorm(MWMTmod)
+```
+
+### Emmeans for MWMT
+And again, looking at pairwise differences.
+```{r}
+diffs<-emmeans(MWMTmod, "BACI", by=c("season", "treat"))
+pairs(diffs)
+# none are significant
+```
+
+## Average daily range
+For the model of average daily range, I used the log transformed value to meet the assumptions of the model.
+```{r}
+# reorganize the variables so they everything is compared to summer and before
+rawtemp2<-rawtemp
+rawtemp2$season<-factor(rawtemp2$season, levels=c("summer", "fall", "winter", "spring"))
+rawtemp2$BACI<-factor(rawtemp2$BACI, levels=c("before", "after"))
+# log transform daily range (add a 1 because some values are 0)
+rawtemp2$logdailyrange<-log(rawtemp2$dailyrange+1)
+# model daily range
+dr.full<-lme(logdailyrange~treat*season*BACI, data=rawtemp2, random=~1|stream, na.action=na.exclude, 
+# add ARMA(1,1) correlation structure
+correlation=corARMA(p=1, q=1))
+Acf(residuals(dr.full, type="normalized"))
+summary(dr.full)
+anova(dr.full)
+```
+
+### Emmeans for daily range
+```{r}
+diffs<-emmeans(dr.full, "BACI", by=c("season", "treat"))
+pairs(diffs)
+```
+
+# Temperature models by year
+These are models to see whether there was evidence of forest regrowth. I filtered out only the data after logging and used water year as a response variable.
+```{r}
+# filter out only after logging data
+weekly.after<-weekly %>% filter(BACI=="After")
+
+# adding in water year
+for(i in 1:nrow(weekly.after)){
+  if (weekly.after$date[i]<"2005-09-01") {
+  weekly.after$water_yr[i]="2004-2005"
+ }
+  else if (weekly.after$date[i]>="2005-09-01" & weekly.after$date[i]<"2006-09-01"){
+  weekly.after$water_yr[i]="2005-2006"
+  }
+  else if (weekly.after$date[i]>="2006-09-01" & weekly.after$date[i]<"2007-09-01"){
+   weekly.after$water_yr[i]="2006-2007"
+  }
+  else {
+    weekly.after$water_yr[i]="2007-2008"
+  }
+}
+
+# add in treatment
+for(i in 1:nrow(weekly.after)){
+if (weekly.after$stream[i]=="j") {
+  weekly.after$treat[i]="thinned"
+}
+else if (weekly.after$stream[i]=="k") {
+  weekly.after$treat[i]="thinned"
+}
+else if (weekly.after$stream[i]=="l") {
+  weekly.after$treat[i]="thinned"
+}
+else {
+    weekly.after$treat[i]="control"
+  }
+}
+```
+
+## AWAT
+Modeling AWAT with water year as an explanatory variable.
+```{r}
+AWATmod.yr<-lme(AWAT~treat*water_yr+season, data=weekly.after, random=~1|stream, na.action=na.exclude, correlation=corAR1())
+
+
+qqnorm(AWATmod.yr) # good
+Acf(residuals(AWATmod.yr, type="normalized")) # residuals clean
+
+summary(AWATmod.yr) # no differences between years
+anova(AWATmod.yr)
+``` 
+
+## MWAT
+Modeling MWAT with water year as an explanatory variable.
+```{r}
+MWATmod.yr<-lme(MWAT~treat*water_yr+season, data=weekly.after, random=~1|stream, na.action=na.exclude, correlation=corAR1())
+
+qqnorm(MWATmod.yr) # good
+Acf(residuals(MWATmod.yr, type="normalized")) # residuals clean
+
+summary(MWATmod.yr) # no differences between years
+anova(MWATmod.yr) # no year effect
+```
+
+## MWMT
+Modeling MWMT with water year as an explanatory variable.
+```{r}
+MWMTmod.yr<-lme(MWMT~treat*water_yr+season, data=weekly.after, random=~1|stream, na.action=na.exclude, correlation=corAR1())
+
+qqnorm(MWMTmod.yr) # good
+Acf(residuals(MWMTmod.yr, type="normalized")) # residuals clean
+
+summary(MWMTmod.yr) # no differences between years
+anova(MWMTmod.yr) # no year effect
+```
+
+## Daily range
+Modeling daily range with water year as an explanatory variable.
+```{r}
+# filter out only after logging data
+rawtemp.after<-rawtemp %>% filter(BACI=="After")
+
+# adding in water year
+for(i in 1:nrow(rawtemp.after)){
+  if (rawtemp.after$date[i]<"2005-09-01") {
+  rawtemp.after$water_yr[i]="2004-2005"
+ }
+  else if (rawtemp.after$date[i]>="2005-09-01" & rawtemp.after$date[i]<"2006-09-01"){
+  rawtemp.after$water_yr[i]="2005-2006"
+  }
+  else if (rawtemp.after$date[i]>="2006-09-01" & rawtemp.after$date[i]<"2007-09-01"){
+   rawtemp.after$water_yr[i]="2006-2007"
+  }
+  else {
+    rawtemp.after$water_yr[i]="2007-2008"
+  }
+}
+
+# Run model
+DRmod.yr<-lme(logdailyrange~treat*water_yr+season, data=rawtemp.after, random=~1|stream, na.action=na.exclude, correlation=corARMA(p=2, q=1))
+
+qqnorm(DRmod.yr) # good
+Pacf(residuals(DRmod.yr, type="normalized")) # residuals clean
+
+summary(DRmod.yr) 
+anova(MWATmod.yr) 
+```
+
+# Streamflow Data
+The data that we have for streamflow is for East Creek and Griffith's creek. It is currently at 15 minute intervals so I converted it to daily mean, minimum, and maximum. The Griffith's creek data goes from 2006-2008 while the East Creek data goes from 2003-2007. 
+```{r}
+# Loading Griffiths creek
+flow<-read.csv("Control_Thinned/K-CK.csv")
+head(flow)
+dim(flow)
+summary(flow)
+
+# Convert from 15 minute intervals to daily values.
+flow<-flow %>% 
+  group_by(Date) %>% drop_na(Discharge) %>% 
+  summarise(mean_flow=mean(Discharge), 
+            max_flow=max(Discharge), 
+            min_flow=min(Discharge))
+
+```
+
+Here I am loading the ec flow rates. They are already daily values so I do not need to convert them.
+```{r}
+flowec<-read.csv("Control_Thinned/EC_streamflow_2004-2007.csv")
+```
+
+Because the ec data only go until 2007 but my other data goes until 2008, I will run a linear regression of the streamflow of the two streams for when they overlap and use the linear regression to predict the ec values for the last year based on the griffiths creek values for that year.
+```{r}
+flow$Date<-as.character(flow$Date) #making character so it matches other one
+
+# renaming the date column to "Date"
+flowec<-flowec %>% rename(Date=Str..SC)
+
+# merging the two flow datasets together with only the values that match up
+flow_eck<-merge(flow, flowec, by="Date", all.x=FALSE) #yay got it to work!
+#streamflow is ec, mean_flow is k
+```
+
+Now I can run a linear regression of the streamflow values for the two streams
+```{r}
+# Run the linear model (streamflow is ec, mean_flow is griffiths)
+Reg<-lm(streamflow~mean_flow, data = flow_eck)
+summary(Reg) #very strong relationship
+
+# Checking assumptions
+hist(flow_eck$streamflow) #probably needs to be log transformed
+hist(flow_eck$mean_flow) #also looks lognormal
+
+# Now running with the log transformed values for streamflow
+Reg2<-lm(log(streamflow)~log(mean_flow), data = flow_eck)
+summary(Reg2)
+
+#linear equation for predicting ec streamflow from k streamflow: y=0.52465+1.38426x. This is for log transformed values.
+# multiple r2 is 0.93, pretty high
+```
+
+Now I can use this linear regression to predict the values for ec for the last year using the griffiths creek data. I am doing that by using the linear regression equation on the log transformed values of k and then transforming them back.
+```{r}
+flowpred<-flow %>% drop_na(mean_flow) %>% 
+  mutate(kflowlog=log(mean_flow),
+         ecflowlog=0.52465+1.38426*(kflowlog),
+         streamflow=exp(ecflowlog))
+# streamflow is the ec values predicted from the mean flow values, need to add to ec dataset
+
+# making new dataset with only values of interest to add to ec data
+new<-flowpred[,c(1,7)] %>% 
+  filter(Date>"2007-09-30"& Date<"2008-04-23")
+
+newflow<-flowec[,c(1,4)]
+#adding to ec data
+flow_data<-rbind(newflow, new) #this is the data with the new values from the regression added on to existing values!
+```
+
+Now I can calculate the rolling average of the previous 5 days of streamflow because it is more biologically relevant than just the daily average streamflow.
+```{r}
+flow_data<-flow_data %>%
+  mutate(flow_prev5=rollmean(flow_data$streamflow, 6, align="right", fill=NA)) #width of 6 will give me the average of that day and the prev 5 days
+```
+
+# Modelling AFDM with environmental variables
+I want to see which environmental variables had the largest effect on biofilm biomass so I am going to model biofilm with all of those environmental variables.
+
+## Merge environmental datasets and afdm data so I can model it
+I am merging the periphyton data with the flow data and temperature data so I can create a model with those variables as explanatory to see which one has the largest effect. I am using the 'datm' dataset because that is the one that is merged with the invertebrate dataset, which contains the PAR values that I want.
+```{r}
+# Make into character format so it can merge
+# Merge biofilm and streamflow data
+datm$date_recovered.x<-as.character(datm$date_recovered.x)
+pflow2<-merge(datm, flow_data, by.x="date_recovered.x", by.y="Date")
+
+# merge that data with temperature data
+rawtemp$date<-as.character(rawtemp$date)
+pflow2$stream_date<-paste(pflow2$stream, pflow2$date_recovered.x, sep="-")
+afdm.env<-merge(rawtemp, pflow2, by="stream_date")
+```
+
+```{r}
+# Now can do a linear model with these environmental variables to see which one is most important
+afdm.env.mod<-lme(log(afdm_mg_cm2)~PAR+meandailytemp+streamflow, data=afdm.env, random=~1|stream.x, na.action=na.exclude)
+afdm.env.mod2<-lm(log(afdm_mg_cm2)~PAR+meandailytemp+streamflow, data=afdm.env)
+
+summary(afdm.env.mod)
+
+anova(afdm.env.mod, afdm.env.mod2)
+
+qqnorm(afdm.env.mod) # pretty good
+anova(afdm.env.mod)
+
+
+# figuring out which variables are most important by removing each of them and seeing what results in greatest R^2 change.
+afdm.env.mod.noT<-lm(log(afdm_mg_cm2)~PAR+streamflow, data=afdm.env, na.action=na.exclude)
+summary(afdm.env.mod.noT) #0.35
+afdm.env.mod.noS<-lm(log(afdm_mg_cm2)~PAR+meandailytemp, data=afdm.env, na.action=na.exclude)
+summary(afdm.env.mod.noS) # 0.47
+afdm.env.mod.noP<-lm(log(afdm_mg_cm2)~streamflow+meandailytemp, data=afdm.env, na.action=na.exclude)
+summary(afdm.env.mod.noP) # 0.14
+# streamflow least important, then temperature, then PAR
+
+# Try with max daily temp to see if it explains more
+afdm.env.mod.max<-lm(log(afdm_mg_cm2)~PAR+maxdailytemp+streamflow, data=afdm.env)
+summary(afdm.env.mod.max) # does not expalin any more variation
+# also tried with daily range and it explains less
+
+anova(afdm.env.mod2)
+
+summary(afdm.env.mod2)
+# looking at the partial R^2 values for each of the variables to see which one explains the most variation
+rsq.partial(afdm.env.mod2)
+```
+
+# Correlation tests
+Here I am looking at the correlation between different variables. I used spearman correlation tests because none of the variables are normally distributed.
+```{r}
+temp_metrics<-rawtemp[, c(1, 5, 7:12)]
+temp_metrics_weekly<-weekly[,c(1,2, 14, 15)]
+
+inv_temp2<-merge(temp_metrics, dat, by="stream_date")
+p_temp2<-merge(temp_metrics, datp, by="stream_date")
+
+in_tempW<-merge(temp_metrics_weekly, dat, by="stream_date")
+
+# Invertebrate abundance and stream temperature
+cor.test(inv_temp2$abundance, inv_temp2$meandailytemp, method="spearman") #not significant
+cor.test(inv_temp2$abundance, inv_temp2$maxdailytemp, method="spearman") # significant
+cor.test(inv_temp2$abundance, inv_temp2$mindailytemp, method="spearman") # not significant
+cor.test(inv_temp2$abundance, inv_temp2$AWAT, method="spearman") # not significant'
+cor.test(inv_temp2$abundance, inv_temp2$MWAT, method="spearman") # not significant
+cor.test(inv_temp2$abundance, inv_temp2$MWMT, method="spearman") # not significant
+cor.test(inv_temp2$abundance, inv_temp2$dailyrange, method="spearman") # very significant (0.23)
+
+# Periphyton
+cor.test(p_temp2$afdm_mg_cm2, p_temp2$meandailytemp, method="spearman") # significant (0.33)
+cor.test(p_temp2$afdm_mg_cm2, p_temp2$maxdailytemp, method="spearman") # significant (0.36)
+cor.test(p_temp2$afdm_mg_cm2, p_temp2$mindailytemp, method="spearman") # significant (0.31)
+cor.test(p_temp2$afdm_mg_cm2, p_temp2$AWAT, method="spearman") # significant (0.33)
+cor.test(p_temp2$afdm_mg_cm2, p_temp2$MWAT, method="spearman") # significant (0.33)
+cor.test(p_temp2$afdm_mg_cm2, p_temp2$MWMT, method="spearman") # significant (0.36)
+cor.test(p_temp2$afdm_mg_cm2, p_temp2$dailyrange, method="spearman") # significant (0.33)
+
+cor.test(inv_temp2$PAR, inv_temp2$meandailytemp, method="spearman") # 0.37
+cor.test(inv_temp2$PAR, inv_temp2$maxdailytemp, method="spearman") # 0.38
+cor.test(inv_temp2$PAR, inv_temp2$mindailytemp, method="spearman") # 0.26
+cor.test(inv_temp2$PAR, inv_temp2$dailyrange, method="spearman")
+
+# GLM of streamflow, PAR, and temperature metrics
+# Need to merge streamflow, invert data, and temperature metrics
+fit<-glm(abundance~maxdailytemp, data=inv_temp2, family=quasipoisson)
+# none of the temperature metrics are significant predictors of invertebrate abundance when they are run by themselves in the model
+inv_flow2<-merge(inv_temp2, flow_data, by.x="date_recovered", by.y="date")
+
+fit<-glm(abundance~meandailytemp+flow_prev5+PAR, data=inv_flow2, family=quasipoisson)
+summary(fit) # none of the temp metrics and neither of the other predictors are significant
+
+# relationship between mayflies and temperature metrics
+mayfly<-inv_temp2 %>% filter(category=="mayflies")
+
+cor.test(mayfly$total_drymass, mayfly$meandailytemp, method="spearman") #NS
+cor.test(mayfly$total_drymass, mayfly$maxdailytemp, method="spearman") #NS
+cor.test(mayfly$total_drymass, mayfly$mindailytemp, method="spearman") # NS
+cor.test(mayfly$total_drymass, mayfly$AWAT, method="spearman") # NS
+cor.test(mayfly$total_drymass, mayfly$MWAT, method="spearman") # NS
+cor.test(mayfly$total_drymass, mayfly$MWMT, method="spearman") # NS
+cor.test(mayfly$total_drymass, mayfly$dailyrange, method="spearman") # significant
+```
+
+# Correlations between chironomids and environmental variables
+```{r}
+# chironomid correlations
+chr.corr.data<-full_join(corr.data, seasonchra[c(1,17)], by="tile_id_date")
+
+cor.test(chr.corr.data$PAR, chr.corr.data$chr_abund, method="spearman")
+# p<0.001, rho=0.23
+cor.test(chr.corr.data$AWAT, chr.corr.data$chr_abund, method="spearman")
+#NA
+cor.test(chr.corr.data$meandailytemp, chr.corr.data$chr_abund, method="spearman")
+# p=0.04, rho=0.07
+cor.test(chr.corr.data$maxdailytemp, chr.corr.data$chr_abund, method="spearman")
+# p=0.008, rho=0.09
+cor.test(chr.corr.data$afdm_mg_cm2, chr.corr.data$chr_abund, method="spearman")
+# rho=0.16, p<0.001
+```
+
+
+
+# Figures
+
+## 1. PAR plot by season
+```{r}
+library(wesanderson)
+dat.par<-dat %>% mutate(season=fct_relevel(season, "fall", "winter", "spring", "summer"))
+# map significance
+plotPAR<-ggplot(dat.par, aes(x=season, y=PAR, fill=treat))+
+  geom_boxplot(alpha=0.8)+
+  scale_fill_manual(values=wes_palette("Chevalier1", 2), labels=c("Reference", "VR"))+
+  ylab(expression('PAR ('*mu ~ m^-2 ~ s^-1*')'))+
+  theme_classic()+
+  theme(legend.position="top", legend.title = element_blank())+
+  scale_x_discrete(labels=c("Fall", "Winter", "Spring", "Summer"))+
+  theme(axis.text.x = element_text(size=11), axis.text.y = element_text(size=11), axis.title.x=element_blank(), axis.title.y=element_text(size=13))+
+  ylim(0, 230)
+
+plotPAR
+ggsave("PARplot.pdf", plot=plotPAR, device="pdf", width=7, height=5)
+```
+
+## 2. Stream temperature plot
+```{r}
+weekly$BACI<-factor(weekly$BACI, levels=c("before", "after"))
+weekly$season<-factor(weekly$season, levels=c("fall", "winter", "spring", "summer"))
+weekly$stream<-factor(weekly$stream, levels=c("ec", "mc", "sc", "l", "j", "k"))
+
+#levels(weekly$BACI)
+levels(weekly$BACI)<-c("Before", "After")
+levels(rawtemp$BACI)<-c("Before", "After")
+
+AWATplot<-ggplot(weekly, mapping=aes(x=season, y=AWAT, fill=stream))+
+  geom_boxplot()+
+  scale_fill_brewer(palette="Dark2", labels=c("East (R)", "Mike (R)", "Spring (R)", "Sidle (VR)", "Mirror (VR)", "Griffiths (VR)"))+
+  labs(y=expression("AWAT ("*degree~C*")"))+
+  theme_classic()+
+  facet_wrap(~BACI)+
+  scale_x_discrete(labels=c("Fall", "Winter", "Spring", "Summer"))+
+  theme(axis.title.x=element_blank(), legend.title=element_blank())+
+  theme(axis.text.x=element_blank(), axis.ticks.x=element_blank())
+#  scale_color_manual(values=c("black", "black", "black", "black", "black", "black"))+
+#  guides(color="none")
+
+AWATplot
+```
+
+```{r}
+MWATplot<-ggplot(weekly, mapping=aes(x=season, y=MWAT, fill=stream))+
+  geom_boxplot()+
+  scale_fill_brewer(palette="Dark2", labels=c("East (R)", "Mike (R)", "Spring (R)", "Sidle (VR)", "Mirror (VR)", "Griffiths (VR)"))+
+  labs(y=expression("MWAT ("*degree~C*")"))+
+  theme_classic()+
+  facet_wrap(~BACI)+
+  scale_x_discrete(labels=c("Fall", "Winter", "Spring", "Summer"))+
+  theme(axis.title.x=element_blank(), legend.title=element_blank())+
+  scale_color_manual(values=c("black", "black", "black", "black", "black", "black"))+
+  guides(color="none")+
+  theme(strip.text=element_blank())+
+  theme(strip.text=element_blank(), axis.text.x=element_blank(), axis.ticks.x=element_blank())
+
+MWATplot
+```
+
+```{r}
+MWMTplot<-ggplot(weekly, mapping=aes(x=season, y=MWMT, fill=stream))+
+  geom_boxplot()+
+  scale_fill_brewer(palette="Dark2", labels=c("East (R)", "Mike (R)", "Spring (R)", "Sidle (VR)", "Mirror (VR)", "Griffiths (VR)"))+
+  labs(y=expression("MWMT ("*degree~C*")"))+
+  theme_classic()+
+  facet_wrap(~BACI)+
+  scale_x_discrete(labels=c("Fall", "Winter", "Spring", "Summer"))+
+  theme(axis.title.x=element_blank(), legend.title=element_blank())+
+#  scale_color_manual(values=c("black", "black", "black", "black", "black", "black"))+
+#  guides(color="none")+
+  theme(strip.text=element_blank(), axis.text.x=element_blank(), axis.ticks.x=element_blank())
+
+MWMTplot
+```
+
+```{r}
+DRplot<-ggplot(rawtemp, mapping=aes(x=season, y=dailyrange, fill=stream))+
+  geom_boxplot()+
+  scale_fill_brewer(palette="Dark2", labels=c("East (R)", "Mike (R)", "Spring (R)", "Sidle (VR)", "Mirror (VR)", "Griffiths (VR)"))+
+  labs(y=expression("Daily Range ("*degree~C*")"))+
+  theme_classic()+
+  facet_wrap(~BACI)+
+  scale_x_discrete(labels=c("Fall", "Winter", "Spring", "Summer"))+
+  theme(axis.title.x=element_blank(), legend.title=element_blank())+
+  scale_color_manual(values=c("black", "black", "black", "black", "black", "black"))+
+  guides(color="none")+
+  theme(strip.text=element_blank())
+
+DRplot
+```
+
+```{r}
+library(ggpubr)
+tempplot<-ggarrange(AWATplot, MWATplot, MWMTplot, DRplot, common.legend=TRUE, labels="AUTO")
+tempplot
+ggsave("TempPlot.pdf", plot=tempplot, device="pdf", height=10, width=5)
+```
+
+## 3. AFDM plot
+```{r}
+datp_plot<-datp_all
+datp_plot$BACI<-factor(datp_plot$BACI, levels=c("before", "after"))
+datp_plot$season<-factor(datp_plot$season, levels=c("fall", "winter", "spring", "summer"))
+datp_plot$site<-factor(datp_plot$site, levels=c("ec", "mc", "sc", "l", "j", "k"))
+
+
+datp_plot$treat<-factor(datp_plot$treat, levels=c("control", "thinned"))
+levels(datp_plot$treat)<-c("Reference", "Variable Retention")
+
+afdm_plot1<-ggplot(datp_plot, mapping=aes(x=season, y=afdm_mg_cm2,  fill=BACI))+
+  geom_boxplot()+
+#  scale_fill_brewer(palette="Dark2", labels=c("East (R)", "Mike (R)", "Spring (R)", "Sidle (VR)", "Mirror (VR)", "Griffiths (VR)"))+
+  scale_fill_manual(values=c("steelblue4", "seagreen3"), labels=c("Before Harvest", "After Harvest"))+
+  ylab(bquote('Periphyton AFDM per tile (mg/'*cm^2*')'))+
+  theme_classic()+
+#  geom_jitter(position=position_jitterdodge(), alpha=0.4)+
+  facet_wrap(~treat)+
+  scale_x_discrete(labels=c("Fall", "Winter", "Spring", "Summer"))+
+  theme(axis.title.x=element_blank(), legend.title=element_blank())+
+ # scale_color_manual(values=c("black", "black", "black", "black", "black", "black"))+
+  guides(color="none")+
+  theme(legend.position="top")
+
+afdm_plot1
+ggsave("AFDMSeasonPlot.pdf", plot=afdm_plot1, height=5, width=7)
+```
+
+## 4. Community Composition Plot
+```{r}
+totalsp<-dat %>% group_by(treat, category, season) %>% drop_na(category) %>% summarise(total_sp=sum(abundance)) # this will give the total invertebrates in each species
+total<-dat %>% group_by(treat, season) %>% drop_na(category) %>% summarise(total=sum(abundance)) # gives total inverts in each treatment and season
+
+comcompdat<-merge(totalsp, total, by=c("season","treat")) %>% mutate(freq=total_sp/total)
+comcompdat %>% group_by(treat, season) %>% summarise(sum(freq))
+
+levels(comcompdat$season)
+# capitalize
+levels(comcompdat$season)<-c("Fall", "Spring", "Summer", "Winter")
+# reorder
+comcompdat<-comcompdat %>% mutate(season=fct_relevel(season,"Fall", "Winter", "Spring", "Summer"))
+
+
+
+# need to add category to these and then leave blank
+comcomp<-ggplot(comcompdat, aes(x=treat, y=freq, group=category))+
+  geom_col(aes(fill=category), alpha=0.8)+
+  scale_y_continuous(labels = scales::percent)+
+  labs(x="Treatment")+
+  facet_wrap(~season)+
+  #scale_fill_manual(values=wes_palette("BottleRocket2", 5), labels=c("Blackflies", "Caddisflies", "Chironomids", "Mayflies", "Stoneflies"))+
+  scale_fill_brewer(palette="Dark2", labels=c("Blackflies", "Caddisflies", "Chironomids", "Mayflies", "Stoneflies"))+
+  scale_x_discrete(labels=c("Reference", "Variable Retention"))+
+  theme_classic()+
+  theme(axis.title.y = element_blank(), legend.title = element_blank(), axis.title.x=element_blank())
+# want to add sample sizes to this but of course it is weird and hard
+comcomp
+ggsave("ComComp.jpeg", plot=comcomp, height=5)
+```
+
+## 5. Correlation Plot
+First, need to merge all relevant data while keeping in 
+```{r}
+# join flow and temperature data
+weekly$date<-as.character(weekly$date)
+
+# merge streamflow and daily temp metrics
+corr.data<-full_join(flow_data, rawtemp, by="date")
+# merge streamflow and weekly temp metrics
+corr.data<-full_join(corr.data, weekly, by="stream_date")
+# merge with afdm measures
+datp_all$stream_date<-paste(datp_all$site, datp_all$date_recovered, sep="-")
+corr.data<-full_join(corr.data, datp_all, by="stream_date")
+# merge with invert and PAR measures
+dat_all$stream_date<-paste(dat_all$stream, dat_all$date_recovered, sep="-")
+corr.data<-full_join(corr.data, dat_all, by="stream_date")
+# add chironomids
+seasonchra<-seasonchra %>% rename(chr_abund=abundance)
+seasonchra$stream_date<-paste(seasonchra$stream, seasonchra$date_recovered, sep="-")
+#corr.data<-full_join(corr.data, seasonchra[c(41,17)], by="stream_date")
+```
+
+Now I can make the correlation plot
+```{r}
+library(corrplot)
+corr.data2<-corr.data[,c(2, 17, 11, 20, 34, 54, 57, 73)]
+
+# add in chironomid abundance
+# figure out which temperature metrics were most correlated and only include those
+
+#names(corr.data2)
+names(corr.data2)<-c("Flow", "AWAT","Temp Range", "MWMT", "Biofilm", "PAR", "Abundance", "Biomass")
+corr.dat3<-cor(corr.data2, use="pairwise.complete.obs", method="spearman")
+testRes = cor.mtest(corr.data2, conf.level = 0.95)
+
+pdf("CorrelationPlot.pdf") 
+# 2. Create a plot
+
+corrplot.mixed(corr.dat3, lower="number", upper="shade", diag="u", tl.pos="lt", order='AOE', p.mat=testRes$p, insig='blank', tl.col="black", tl.cex=0.8, lower.col="black")
+
+dev.off() 
+# need to save
+
+```
+
+# 6. 3-panel figure of overall abundance and biomass
+
+Overall abundance
+```{r}
+library(wesanderson)
+dat<-dat %>% mutate(season=fct_relevel(season, "fall", "winter", "spring", "summer"))
+
+abund.plot<-ggplot(dat, aes(x=season, y=log(abundance), fill=treat))+
+  geom_boxplot()+
+  scale_fill_manual(values=wes_palette("Chevalier1", 2), labels=c("Reference", "VR"))+
+#  geom_errorbar(
+ #   aes(ymin=mean-se, ymax=mean+se, group=treat),
+  #  width=0.20, position=position_dodge(0.8)
+  #)+
+  labs(y="Log abundance per tile", x="Season")+
+  theme_classic()+
+  theme(legend.position="top")+
+  theme(axis.title.x=element_blank(), legend.title = element_blank(), legend.text=element_text(size=10), axis.text.x = element_text(size=10))+
+  scale_x_discrete(labels=c("Fall", "Winter", "Spring", "Summer"))+
+  annotate("text", x=4, y=4, label="*", size=10)
+
+```
+
+Overall biomass
+```{r}
+biomass.plot<-ggplot(dat, aes(x=season, y=log(total_drymass), fill=treat))+
+  geom_boxplot()+
+  scale_fill_manual(values=wes_palette("Chevalier1", 2), labels=c("Reference", "VR"))+
+#  geom_errorbar(
+ #   aes(ymin=mean-se, ymax=mean+se, group=treat),
+  #  width=0.20, position=position_dodge(0.8)
+  #)+
+  labs(y="Log biomass per tile (mg)", x="Season")+
+  theme_classic()+
+  theme(legend.position="top")+
+  theme(axis.title.x=element_blank(), legend.title = element_blank(), legend.text=element_text(size=10), axis.text.x = element_text(size=10))+
+  scale_x_discrete(labels=c("Fall", "Winter", "Spring", "Summer"))
+
+biomass.plot
+```
+
+Put abundance and biomass plot together
+```{r}
+library(ggpubr)
+invert.plot<-ggarrange(abund.plot, biomass.plot, common.legend=TRUE, labels="AUTO")
+invert.plot
+ggsave("InvertPlot.pdf", plot=invert.plot, device="pdf", height=4, width=8)
+```
+
+# 7. Plot of seasonal differences in chironomid and mayfly biomass
+
+Chironomid plot
+```{r}
+seasonchra<-dat %>% 
+  filter(category=="chironomids")  #grouping by date and treatment
+  
+
+seasonchra<-seasonchra %>% mutate(season=fct_relevel(season,"fall","winter", "spring", "summer"))
+
+plotchr1<-ggplot(seasonchra, aes(x=season, y=log(total_drymass), fill=treat))+
+  geom_boxplot(position="dodge")+
+  scale_fill_manual(values=wes_palette("Chevalier1", 2), labels=c("Reference", "VR"))+
+  labs(x="Treatment", y="Log chironomid biomass per tile (mg)")+
+  theme_classic()+
+  theme(legend.position="top", axis.title.x=element_blank(), legend.title = element_blank(), legend.text=element_text(size=10), axis.text.x = element_text(size=10))+
+  scale_x_discrete(labels=c("Fall", "Winter", "Spring", "Summer"))+
+  annotate("text", x=4, y=4, label="*", size=10)
+
+plotchr1
+```
+
+Mayfly plot
+```{r}
+seasonmaya<-dat %>% 
+  filter(category=="mayflies") 
+
+seasonmaya<-seasonmaya %>% mutate(season=fct_relevel(season,"fall", "winter", "spring", "summer"))
+
+plotmay1<-ggplot(seasonmaya, aes(x=season, y=log(total_drymass), fill=treat))+
+  geom_boxplot()+
+  scale_fill_manual(values=wes_palette("Chevalier1", 2), labels=c("Reference", "VR"))+
+  labs(x="Treatment", y="Log Mayfly biomass per tile (mg)")+
+  theme_classic()+
+  theme(legend.position="top", axis.title.x=element_blank(), legend.title = element_blank(), legend.text=element_text(size=10), axis.text.x = element_text(size=10))+
+  scale_x_discrete(labels=c("Fall", "Winter", "Spring", "Summer"))+
+  annotate("text", x=c(3,4), y=c(5.7,5.7), label="*", size=10)
+plotmay1
+```
+
+Put together
+```{r}
+mayfly.chrplot<-ggarrange(plotchr1, plotmay1, common.legend=TRUE, labels="AUTO")
+  
+ggsave("MayflyChrPlot.pdf", plot=mayfly.chrplot, height=4, width=8)
+```
+
+
+
+
+
+
+
