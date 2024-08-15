@@ -22,6 +22,7 @@ library(lubridate) # for dates on stream temperature data
 library(rsq) # to look at partial R squared values of environmental models
 ```
 
+# Add some comment
 # Data sets
 ```{r}
 # Invertebrate abundance and biomass dataset

@@ -8,3 +8,5 @@ MKRE.TILE.INVERTS.ctrl_thinned is the invertebrate data
 Tmax, Tmin, and Tmean are the mean, minimum, and maximum daily stream temperatures
 EC_streamflow_2004-2007 is the streamflow data from East Creek
 K-CK is the streamflow data from Griffith's creek
+
+Add some things
